@@ -287,7 +287,6 @@ def reset_evaluation(uid: str):
     get_tasks.clear()
     get_profiles.clear()
 
-@st.cache_data(ttl=30)
 def get_selfreport(uid: str) -> dict:
     sb = get_supabase()
     try:
@@ -315,12 +314,6 @@ def save_selfreport(uid: str, data: dict):
         "suggestion":  data.get("suggestion",""),
         "updated_at":  data.get("updated_at", datetime.now().isoformat()),
     }).execute()
-    get_selfreport.cache_clear() if hasattr(get_selfreport, 'cache_clear') else None
-    # st.cache_data 방식으로 초기화
-    try:
-        get_selfreport.clear()
-    except Exception:
-        pass
 
 
 # ══════════════════════════════════════════════
@@ -575,7 +568,7 @@ def show_evaluatee():
 
         selfreport = get_selfreport(uid)
 
-        with st.form("selfreport_form"):
+        with st.form(f"selfreport_form_{uid}"):
             st.markdown("#### □ 자기계발 사항")
             dev1 = st.text_area(
                 "1. 자기계발 및 경력관리를 위해 교육연수를 받거나 연구한 사항",
@@ -599,7 +592,7 @@ def show_evaluatee():
                 prev_goals += [""] * (5 - len(prev_goals))
             for i in range(5):
                 g = st.text_input(f"업무목표 {i+1}", value=prev_goals[i],
-                                  key=f"goal_{i}",
+                                  key=f"sr_goal_{uid}_{i}",
                                   placeholder=f"업무목표 {i+1}을 입력하세요.")
                 goals.append(g)
 
