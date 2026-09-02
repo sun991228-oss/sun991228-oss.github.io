@@ -417,23 +417,20 @@ def get_evaluatee_scope(ev_uid):
             continue
         p       = profiles.get(uid, {})
         ee_team = p.get("team", u.get("team", ""))
-        ee_dept = get_team_dept(ee_team)
-        ee_pos  = p.get("position", u.get("position", "팀원"))
+        ee_dept = p.get("dept", u.get("dept", "")) or get_team_dept(ee_team)
+        # position: profiles 우선, 없으면 users에서 직접 읽기
+        ee_pos  = p.get("position", "") or u.get("position", "팀원")
 
         if ev_pos == "팀장":
-            # 자기 팀 팀원만 (팀장 본인의 1차 평가 대상)
             if ee_team == ev_team and ee_pos in ("팀원", "공무직"):
                 result.append(uid)
         elif ev_pos == "부장":
-            # 소속 부 전체: 팀원+팀장 (부장은 2차 평가자)
             if ee_dept == ev_dept and ee_pos in ("팀원", "팀장", "공무직"):
                 result.append(uid)
         elif ev_pos == "본부장":
-            # 전사: 팀원+팀장+부장 (본부장은 3차 평가자)
             if ee_pos in ("팀원", "팀장", "부장", "공무직"):
                 result.append(uid)
         elif ev_pos == "대표이사":
-            # 전사 모든 피평가자 (4차 평가자)
             result.append(uid)
 
     return result
@@ -775,15 +772,16 @@ def show_evaluator():
     for ee_id in assigned:
         ee_u   = users.get(ee_id, {})
         ee_p   = profiles.get(ee_id, {})
-        ee_pos = ee_p.get("position", ee_u.get("position","팀원"))
-        team   = ee_p.get("team", ee_u.get("team",""))
+        # position: profiles 우선, 없으면 users에서
+        ee_pos = ee_p.get("position", "") or ee_u.get("position", "팀원")
+        team   = ee_p.get("team", ee_u.get("team", ""))
 
         if ee_pos in ("부장", "본부장"):
             group_bosik.append(ee_id)
         elif team:
             group[team].append(ee_id)
         else:
-            group_bosik.append(ee_id)  # 팀도 없고 보직자도 아니면 보직자 탭으로
+            group_bosik.append(ee_id)
 
     # 탭 구성: 보직자 탭 먼저, 그 다음 팀별 탭
     tab_names = []
