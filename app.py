@@ -113,7 +113,7 @@ def score_color(s):
 # ══════════════════════════════════════════════
 # DB 데이터 접근 함수 (Supabase)
 # ══════════════════════════════════════════════
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def get_users() -> dict:
     sb = get_supabase()
     rows = sb.table("users").select("*").execute().data
@@ -129,7 +129,7 @@ def delete_user(uid: str):
     sb.table("users").delete().eq("uid", uid).execute()
     get_users.clear()
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def get_profiles() -> dict:
     sb = get_supabase()
     rows = sb.table("profiles").select("*").execute().data
@@ -160,19 +160,23 @@ def save_profile(uid: str, p: dict):
 def get_tasks() -> dict:
     sb = get_supabase()
     rows = sb.table("tasks").select("*").execute().data
-    return {r["uid"]: {"tasks": r.get("tasks_json", []),
-                        "updated": r.get("updated_at", "")} for r in rows}
+    return {r["uid"]: {
+        "tasks":     r.get("tasks_json", []),
+        "work_desc": r.get("work_desc", ""),
+        "updated":   r.get("updated_at", ""),
+    } for r in rows}
 
-def save_tasks(uid: str, tasks_list: list):
+def save_tasks(uid: str, tasks_list: list, work_desc: str = ""):
     sb = get_supabase()
     sb.table("tasks").upsert({
         "uid":        uid,
         "tasks_json": tasks_list,
+        "work_desc":  work_desc,
         "updated_at": datetime.now().isoformat(),
     }).execute()
     get_tasks.clear()
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=20)
 def get_evaluations() -> dict:
     sb = get_supabase()
     ev_rows = sb.table("evaluations").select("*").execute().data
@@ -314,6 +318,81 @@ def save_selfreport(uid: str, data: dict):
         "suggestion":  data.get("suggestion",""),
         "updated_at":  data.get("updated_at", datetime.now().isoformat()),
     }).execute()
+
+@st.cache_data(ttl=60)
+def get_notices() -> list:
+    sb = get_supabase()
+    try:
+        return sb.table("notices").select("*").order("order_no").execute().data
+    except Exception:
+        return []
+
+def save_notice(notice_id: int, title: str, content: str):
+    sb = get_supabase()
+    sb.table("notices").update({
+        "title": title, "content": content,
+        "updated_at": datetime.now().isoformat(),
+    }).eq("id", notice_id).execute()
+    get_notices.clear()
+
+def add_notice(title: str, content: str, order_no: int):
+    sb = get_supabase()
+    sb.table("notices").insert({
+        "title": title, "content": content,
+        "order_no": order_no,
+        "updated_at": datetime.now().isoformat(),
+    }).execute()
+    get_notices.clear()
+
+def delete_notice(notice_id: int):
+    sb = get_supabase()
+    sb.table("notices").delete().eq("id", notice_id).execute()
+    get_notices.clear()
+
+@st.cache_data(ttl=10)
+def get_eval_locked() -> bool:
+    """평가 입력 잠금 여부 반환 (피평가자용)"""
+    sb = get_supabase()
+    try:
+        rows = sb.table("system_settings").select("value").eq("key","eval_locked").execute().data
+        if rows:
+            return rows[0]["value"] == "true"
+    except Exception:
+        pass
+    return False
+
+def set_eval_locked(locked: bool):
+    sb = get_supabase()
+    sb.table("system_settings").upsert({
+        "key":        "eval_locked",
+        "value":      "true" if locked else "false",
+        "updated_at": datetime.now().isoformat(),
+    }).execute()
+    get_eval_locked.clear()
+
+@st.cache_data(ttl=10)
+def get_stage_locks() -> dict:
+    """차수별 평가자 잠금 여부 반환 {'1차': bool, '2차': bool, '3차': bool, '4차': bool}"""
+    sb = get_supabase()
+    result = {"1차": False, "2차": False, "3차": False, "4차": False}
+    try:
+        rows = sb.table("system_settings").select("*").like("key","stage_locked_%").execute().data
+        for r in rows:
+            stage = r["key"].replace("stage_locked_","")
+            if stage in result:
+                result[stage] = r["value"] == "true"
+    except Exception:
+        pass
+    return result
+
+def set_stage_locked(stage: str, locked: bool):
+    sb = get_supabase()
+    sb.table("system_settings").upsert({
+        "key":        f"stage_locked_{stage}",
+        "value":      "true" if locked else "false",
+        "updated_at": datetime.now().isoformat(),
+    }).execute()
+    get_stage_locks.clear()
 
 
 # ══════════════════════════════════════════════
@@ -496,27 +575,43 @@ def show_evaluatee():
     st.caption(f"👤 {name} | {dept} {team} | {pos} ({grd})")
     st.divider()
 
-    t1, t2, t3 = st.tabs(["👤 인적사항","📝 담당업무·과제","📋 근무성적평정서"])
+    t1, t2, t3 = st.tabs(["📢 성과평가 안내","📝 담당업무·과제 입력","📋 평가 참고자료 입력"])
+
+    eval_locked = get_eval_locked()
 
     with t1:
-        st.subheader("인적 사항")
-        st.info(f"소속: **{dept} / {team}** | 직책: **{pos}** | 직급: **{grd}**\n\n*(조직 정보는 총괄 관리자가 관리합니다)*")
-        with st.form("profile_form"):
-            c1, c2 = st.columns(2)
-            ipsa     = c1.text_input("입사일",       value=p.get("입사일",""),       placeholder="예: 2020-03-02")
-            hyun_jik = c1.text_input("현직급임용일", value=p.get("현직급임용일",""), placeholder="예: 2023-01-01")
-            hyun_bo  = c1.text_input("현보직일",     value=p.get("현보직일",""),     placeholder="예: 2024-03-01")
-            damdan   = c2.text_input("담당업무(요약)",value=p.get("담당업무",""))
-            if st.form_submit_button("💾 저장", type="primary"):
-                save_profile(uid, {**p, "입사일":ipsa,"현직급임용일":hyun_jik,"현보직일":hyun_bo,"담당업무":damdan})
-                st.success("저장되었습니다.")
+        st.subheader("📢 성과평가 안내")
+        st.divider()
+        notices = get_notices()
+        if notices:
+            for i, n in enumerate(notices, 1):
+                with st.container(border=True):
+                    st.markdown(f"**{i}. {n['title']}**")
+                    st.markdown(n["content"])
+        else:
+            st.info("등록된 공지사항이 없습니다.")
+        st.divider()
+        st.info(f"소속: **{dept} / {team}** | 직책: **{pos}** | 직급: **{grd}**")
 
     with t2:
+        if eval_locked:
+            st.warning("🔒 평가 입력 기간이 종료되었습니다. 입력 및 수정이 불가합니다.")
+            st.stop()
         st.subheader("담당업무·과제 등록")
         st.caption("개별과제(최대 5개, 비중 합계 90%) + 팀별과제(1개, 비중 10%) / 업무비중 합계 = 100%")
         tasks_data = get_tasks()
         my_tasks   = tasks_data.get(uid, {}).get("tasks", [])
+        prev_work  = tasks_data.get(uid, {}).get("work_desc", "")
         with st.form("task_form"):
+            st.markdown("**담당업무**")
+            work_desc = st.text_area(
+                "담당업무",
+                value=prev_work,
+                height=80,
+                placeholder="본인의 주요 담당업무를 간략하게 기술하세요. (예: 예산 편성 및 집행 관리, 계약 업무 등)",
+                label_visibility="collapsed",
+            )
+            st.divider()
             st.markdown("**개별과제**")
             indiv_prev = [t for t in my_tasks if t.get("type")=="개별"]
             team_prev  = next((t for t in my_tasks if t.get("type")=="팀별"), {})
@@ -553,17 +648,38 @@ def show_evaluatee():
                 elif not indiv_new:
                     st.error("과제를 최소 1개 입력하세요.")
                 else:
-                    save_tasks(uid, all_tasks)
+                    save_tasks(uid, all_tasks, work_desc)
                     st.success("저장되었습니다."); st.rerun()
         if my_tasks:
             st.divider()
-            st.dataframe(pd.DataFrame([{"구분":t["type"],"번호":t["no"],"과제명":t["title"],
-                                         "비중":f"{t['weight']:.0%}","주요실적":t.get("result","")}
-                                        for t in my_tasks]), use_container_width=True, hide_index=True)
+            if prev_work:
+                st.markdown(f"**담당업무:** {prev_work}")
+                st.divider()
+            hrow = st.columns([1, 1, 3, 1, 5])
+            hrow[0].markdown("**구분**"); hrow[1].markdown("**번호**")
+            hrow[2].markdown("**과제명**"); hrow[3].markdown("**비중**")
+            hrow[4].markdown("**주요실적**")
+            st.divider()
+            for i, t in enumerate(my_tasks):
+                trow = st.columns([1, 1, 3, 1, 5])
+                trow[0].caption("🔹개별" if t["type"]=="개별" else "🔸팀별")
+                trow[1].caption(str(t["no"]))
+                trow[2].markdown(t["title"])
+                trow[3].caption(f"{t['weight']:.0%}")
+                result_html = t.get("result","").replace("\n","<br>")
+                trow[4].markdown(
+                    f"<div style='font-size:0.85rem;line-height:1.5'>{result_html}</div>",
+                    unsafe_allow_html=True
+                )
+                if i < len(my_tasks) - 1:
+                    st.divider()
 
-    # ── 근무성적평정서 ────────────────────────
+    # ── 평가 참고자료 입력 ────────────────────
     with t3:
-        st.subheader("📋 근무성적평정서 작성")
+        if eval_locked:
+            st.warning("🔒 평가 입력 기간이 종료되었습니다. 입력 및 수정이 불가합니다.")
+            st.stop()
+        st.subheader("📋 평가 참고자료 입력")
         st.caption("평가자가 참고자료로 열람합니다. 작성 후 저장하세요.")
 
         selfreport = get_selfreport(uid)
@@ -613,7 +729,7 @@ def show_evaluatee():
                     "goals": goals, "suggestion": suggestion,
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 })
-                st.success("✅ 근무성적평정서가 저장되었습니다.")
+                st.success("✅ 평가 참고자료가 저장되었습니다.")
                 st.rerun()
 
         # 저장일시 표시
@@ -635,9 +751,16 @@ def show_evaluator():
     st.caption(f"👤 {ev_name} | 직책: {ev_pos} | 담당 차수: {stage}")
     st.divider()
 
+    # 차수별 잠금 확인
+    stage_locks = get_stage_locks()
+    if stage_locks.get(stage, False):
+        st.warning(f"🔒 {stage} 평가 입력 기간이 종료되었습니다. 입력 및 수정이 불가합니다.")
+        st.stop()
+
     tasks_data  = get_tasks()
     evaluations = get_evaluations()
     profiles    = get_profiles()
+    users       = get_users()
     assigned    = get_evaluatee_scope(ev_uid)
 
     if not assigned:
@@ -645,18 +768,173 @@ def show_evaluator():
 
     stage_order = list(EVAL_WEIGHTS.keys())  # 전체 차수 순서 (1차~4차)
 
-    # 팀별 그룹핑
-    group = defaultdict(list)
-    for ee_id in assigned:
-        ee_u = users.get(ee_id, {})
-        ee_p = profiles.get(ee_id, {})
-        team = ee_p.get("team", ee_u.get("team","기타"))
-        group[team].append(ee_id)
+    # 팀별 그룹핑 — 팀이 없는 보직자(부장·본부장)는 별도 그룹
+    group        = defaultdict(list)
+    group_bosik  = []   # 부장·본부장 (팀 없음)
 
-    tab_names = list(group.keys())
+    for ee_id in assigned:
+        ee_u   = users.get(ee_id, {})
+        ee_p   = profiles.get(ee_id, {})
+        ee_pos = ee_p.get("position", ee_u.get("position","팀원"))
+        team   = ee_p.get("team", ee_u.get("team",""))
+
+        if ee_pos in ("부장", "본부장") or not team:
+            group_bosik.append(ee_id)
+        else:
+            group[team].append(ee_id)
+
+    # 탭 구성: 보직자 탭 먼저, 그 다음 팀별 탭
+    tab_names = []
+    if group_bosik:
+        tab_names.append("👔 보직자 (부장·본부장)")
+    tab_names += list(group.keys())
+
     tabs = st.tabs(tab_names) if tab_names else []
 
-    for tab, team_name in zip(tabs, tab_names):
+    tab_iter = iter(tabs)
+
+    # 보직자 탭
+    if group_bosik:
+        with next(tab_iter):
+            for ee_id in group_bosik:
+                if ee_id not in users: continue
+                ee_u    = users[ee_id]
+                ee_p    = profiles.get(ee_id, {})
+                ee_name = ee_u.get("name", ee_id)
+                ee_pos  = ee_p.get("position", ee_u.get("position","팀원"))
+                ee_grd  = ee_p.get("grade", ee_u.get("grade",""))
+                tasks   = tasks_data.get(ee_id, {}).get("tasks", [])
+                ev_all  = evaluations.get(ee_id, {})
+                my_ev   = ev_all.get(stage, {})
+
+                ee_stages = get_stage_order_for_ee(ee_pos)
+                if stage not in ee_stages:
+                    continue
+
+                stage_idx  = ee_stages.index(stage)
+                prev_stage = ee_stages[stage_idx - 1] if stage_idx > 0 else None
+
+                with st.expander(f"👤 {ee_name}  ({ee_pos} / {ee_grd})", expanded=False):
+                    if prev_stage and not ev_all.get(prev_stage):
+                        st.warning(f"⏳ {prev_stage} 평가가 완료되지 않았습니다."); continue
+
+                    prev_stages_done = [s for s in ee_stages
+                                        if s != stage and
+                                        ee_stages.index(s) < ee_stages.index(stage)
+                                        and ev_all.get(s)]
+
+                    # 담당업무
+                    work_desc_ev = tasks_data.get(ee_id, {}).get("work_desc", "")
+                    col_info = st.container()
+                    with col_info:
+                        if work_desc_ev:
+                            st.markdown(f"**담당업무:** {work_desc_ev}")
+                            st.divider()
+                        st.caption("(보직자는 과제 입력 없이 평가합니다.)")
+
+                    # 평가 참고자료
+                    sr = get_selfreport(ee_id)
+                    if any([sr.get("dev1"), sr.get("dev2"),
+                            any(sr.get("goals",[])), sr.get("suggestion")]):
+                        with st.expander("📋 평가 참고자료 보기", expanded=False):
+                            if sr.get("dev1"):
+                                st.markdown("**자기계발 1. 올해 교육연수**"); st.info(sr["dev1"])
+                            if sr.get("dev2"):
+                                st.markdown("**자기계발 2. 내년도 희망 교육연수**"); st.info(sr["dev2"])
+                            goals = [g for g in sr.get("goals",[]) if g]
+                            if goals:
+                                st.markdown("**다음연도 업무목표**")
+                                for i, g in enumerate(goals, 1): st.markdown(f"{i}. {g}")
+                            if sr.get("suggestion"):
+                                st.markdown("**희망부서 및 건의사항**"); st.info(sr["suggestion"])
+                    else:
+                        st.caption("📋 평가 참고자료 미작성")
+
+                    if prev_stages_done:
+                        with st.expander(f"📋 이전 평가 결과 보기 ({', '.join(prev_stages_done)})", expanded=False):
+                            p_cols = st.columns(len(prev_stages_done))
+                            for col, ps in zip(p_cols, prev_stages_done):
+                                ps_data = ev_all.get(ps, {})
+                                ev_user = users.get(ps_data.get("evaluator_id",""), {})
+                                a = calc_task_score(tasks, ps_data)
+                                b = calc_ability_score(ps_data)
+                                with col:
+                                    st.markdown(f"**{ps} 평가결과**")
+                                    st.caption(f"평가자: {ev_user.get('name','')}")
+                                    st.caption(f"평가일: {ps_data.get('date','')}")
+                                    st.markdown(
+                                        f"<div style='text-align:center;padding:.5rem;border-radius:8px;"
+                                        f"background:#1F4E7915;border:1.5px solid #1F4E79;margin:.2rem 0'>"
+                                        f"<div style='font-size:.72rem;color:#555'>근무실적(A)</div>"
+                                        f"<div style='font-size:1.3rem;font-weight:bold;color:#1F4E79'>{a:.1f}점</div>"
+                                        f"</div>"
+                                        f"<div style='text-align:center;padding:.5rem;border-radius:8px;"
+                                        f"background:#37562315;border:1.5px solid #375623;margin:.2rem 0'>"
+                                        f"<div style='font-size:.72rem;color:#555'>직무능력(B)</div>"
+                                        f"<div style='font-size:1.3rem;font-weight:bold;color:#375623'>{b:.1f}점</div>"
+                                        f"</div>", unsafe_allow_html=True)
+                        st.divider()
+
+                    with st.form(f"eval_{stage}_{ee_id}_bosik"):
+                        st.markdown("#### ① 근무실적 평정 (A, 60점)")
+                        st.caption("각 과제별 10점 만점으로 평가 → 환산점수 = 평가점수 × 업무비중(%) × 6")
+                        task_scores = {}
+                        task_total_conv = 0.0
+                        if not tasks:
+                            st.warning("피평가자가 과제를 등록하지 않았습니다.")
+                        else:
+                            hcols = st.columns([3, 1, 1, 1])
+                            hcols[0].markdown("**과제명**"); hcols[1].markdown("**비중**")
+                            hcols[2].markdown("**평가(10점)**"); hcols[3].markdown("**환산점수**")
+                            for t in tasks:
+                                tid    = t["id"]
+                                prev_s = my_ev.get("tasks", {}).get(tid, 0)
+                                rc = st.columns([3, 1, 1, 1])
+                                rc[0].markdown(f"{'🔹' if t['type']=='개별' else '🔸'} {t['title']}")
+                                rc[1].markdown(f"**{t['weight']:.0%}**")
+                                sc = rc[2].number_input("", min_value=0, max_value=10,
+                                    value=int(prev_s), step=1,
+                                    key=f"ts_{stage}_{ee_id}_b_{tid}",
+                                    label_visibility="collapsed")
+                                conv = round(sc * t["weight"] * 6, 2)
+                                rc[3].markdown(f"**{conv:.2f}점**")
+                                task_scores[tid] = sc; task_total_conv += conv
+                            st.info(f"➡️ 근무실적 합계: **{task_total_conv:.2f}점** / 60점")
+                        st.divider()
+                        st.markdown("#### ② 직무수행능력 (B, 35점)")
+                        ability_scores = {}; ab_total = 0
+                        hcols2 = st.columns([2, 1, 4, 1])
+                        hcols2[0].markdown("**평정요소**"); hcols2[1].markdown("**배점**")
+                        hcols2[2].markdown("**정의**"); hcols2[3].markdown("**점수**")
+                        for ab_name, ab_max, ab_def in ABILITY_ITEMS:
+                            prev_ab = my_ev.get("ability", {}).get(ab_name, 0)
+                            row2 = st.columns([2, 1, 4, 1])
+                            row2[0].markdown(f"**{ab_name}**"); row2[1].markdown(f"{ab_max}점")
+                            row2[2].markdown(f"<small>{ab_def.replace(chr(10),'<br>')}</small>",
+                                             unsafe_allow_html=True)
+                            ab_sc = row2[3].number_input("", min_value=0, max_value=ab_max,
+                                value=int(prev_ab), step=1,
+                                key=f"ab_{stage}_{ee_id}_b_{ab_name}",
+                                label_visibility="collapsed")
+                            ability_scores[ab_name] = ab_sc; ab_total += ab_sc
+                        st.info(f"➡️ 직무수행능력 합계: **{ab_total}점** / 35점")
+                        st.divider()
+                        prev_op = my_ev.get("opinion","")
+                        opinion = st.text_area("📝 평정 의견", value=prev_op, height=80,
+                                               key=f"op_{stage}_{ee_id}_bosik")
+                        submitted = st.form_submit_button("💾 평가 저장", type="primary",
+                                                          use_container_width=True)
+
+                    if submitted:
+                        save_evaluation(ee_id, stage, {
+                            "tasks": task_scores, "ability": ability_scores,
+                            "opinion": opinion, "evaluator_id": ev_uid,
+                            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        })
+                        st.success(f"✅ {ee_name}의 {stage} 평가 저장 완료!"); st.rerun()
+
+    # 팀별 탭
+    for tab, team_name in zip(tab_iter, group.keys()):
         with tab:
             for ee_id in group[team_name]:
                 if ee_id not in users: continue
@@ -734,12 +1012,32 @@ def show_evaluator():
 
                     col_info = st.container()
                     with col_info:
+                        # 담당업무 표시
+                        work_desc_ev = tasks_data.get(ee_id, {}).get("work_desc", "")
+                        if work_desc_ev:
+                            st.markdown(f"**담당업무:** {work_desc_ev}")
+                            st.divider()
                         if tasks:
-                            st.dataframe(pd.DataFrame([{"구분":t["type"],"과제명":t["title"],
-                                                         "비중":f"{t['weight']:.0%}",
-                                                         "주요실적":t.get("result","")}
-                                                        for t in tasks]),
-                                         use_container_width=True, hide_index=True)
+                            # 헤더
+                            hrow = st.columns([1, 3, 1, 5])
+                            hrow[0].markdown("**구분**")
+                            hrow[1].markdown("**과제명**")
+                            hrow[2].markdown("**비중**")
+                            hrow[3].markdown("**주요실적**")
+                            st.divider()
+                            for i, t in enumerate(tasks):
+                                trow = st.columns([1, 3, 1, 5])
+                                trow[0].caption("🔹개별" if t["type"]=="개별" else "🔸팀별")
+                                trow[1].markdown(t["title"])
+                                trow[2].caption(f"{t['weight']:.0%}")
+                                # 줄바꿈 보존: \n → <br>
+                                result_html = t.get("result","").replace("\n","<br>")
+                                trow[3].markdown(
+                                    f"<div style='font-size:0.85rem;line-height:1.5'>{result_html}</div>",
+                                    unsafe_allow_html=True
+                                )
+                                if i < len(tasks) - 1:
+                                    st.divider()
                         else:
                             st.caption("등록된 과제가 없습니다.")
 
@@ -747,7 +1045,7 @@ def show_evaluator():
                     sr = get_selfreport(ee_id)
                     if any([sr.get("dev1"), sr.get("dev2"),
                             any(sr.get("goals",[])), sr.get("suggestion")]):
-                        with st.expander("📋 근무성적평정서 참고자료 보기", expanded=False):
+                        with st.expander("📋 평가 참고자료 보기", expanded=False):
                             if sr.get("dev1"):
                                 st.markdown("**자기계발 1. 올해 교육연수**")
                                 st.info(sr["dev1"])
@@ -764,7 +1062,7 @@ def show_evaluator():
                                 st.info(sr["suggestion"])
                             st.caption(f"작성일: {sr.get('updated_at','')}")
                     else:
-                        st.caption("📋 근무성적평정서 미작성")
+                        st.caption("📋 평가 참고자료 미작성")
                     with st.form(f"eval_{stage}_{ee_id}"):
 
                         # ① 근무실적 평정 (A, 60점)
@@ -870,13 +1168,19 @@ def show_admin():
     profiles    = get_profiles()
     evaluatees  = get_evaluatees()
 
+    # 모든 피평가자 calc_final 한 번에 계산 (중복 호출 방지)
+    all_results = {uid: calc_final(uid, evaluations, tasks_data) for uid in evaluatees}
+
     total   = len(evaluatees)
-    pdf_ok  = sum(1 for u in evaluatees if pdf_exists(u))
+    pdf_names = get_pdf_names()  # Storage 1회 호출
+    pdf_ok  = sum(1 for u in evaluatees if f"{u}.pdf" in pdf_names)
     task_ok = sum(1 for u in evaluatees if tasks_data.get(u,{}).get("tasks"))
-    done_4  = sum(1 for u in evaluatees if evaluations.get(u,{}).get("4차"))
-    ded_ok  = sum(1 for u in evaluatees if evaluations.get(u,{}).get("deductions") is not None)
-    full_ok = sum(1 for u in evaluatees
-                  if calc_final(u, evaluations, tasks_data).get("종합",{}).get("완료"))
+    done_4  = sum(1 for u in evaluatees
+                  if evaluations.get(u,{}).get("4차"))
+    ded_ok  = sum(1 for u in evaluatees
+                  if evaluations.get(u,{}).get("deductions") is not None)
+    full_ok = sum(1 for u, r in all_results.items()
+                  if r.get("종합",{}).get("완료"))
 
     cols = st.columns(6)
     for c, (label, val) in zip(cols, [
@@ -888,8 +1192,8 @@ def show_admin():
 
     st.divider()
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📋 전체 현황", "🧘 직무수행태도", "🏆 직급별 순위", "🧑‍💼 계정 관리"
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 전체 현황", "🧘 직무수행태도", "🏆 직급별 순위", "📢 공지 관리", "🧑‍💼 계정 관리"
     ])
 
     # ── 탭1 전체 현황 ─────────────────────────
@@ -911,46 +1215,47 @@ def show_admin():
         if not filtered:
             st.info("해당 조건의 피평가자가 없습니다.")
         else:
-            # 테이블 헤더
-            hcols = st.columns([2, 1.5, 1.5, 1, 1, 1, 1, 1, 1, 1, 1.2, 1.2])
-            for hc, label in zip(hcols, ["이름","소속부","소속팀","직책","직급",
-                                          "과제","1차","2차","3차","4차","태도","평정표"]):
-                hc.markdown(f"**{label}**")
-            st.divider()
-
+            # DataFrame으로 한 번에 표시 (렌더링 속도 개선)
             rows_csv = []
             for uid, u, p, team, dept in filtered:
-                ev   = evaluations.get(uid, {})
-                ag   = ev.get("assigned_grade", "-")
-                rc   = st.columns([2, 1.5, 1.5, 1, 1, 1, 1, 1, 1, 1, 1.2, 1.2])
-                rc[0].markdown(f"**{u.get('name','')}**")
-                rc[1].caption(dept)
-                rc[2].caption(team)
-                rc[3].caption(p.get("position",u.get("position","")))
-                rc[4].caption(p.get("grade",u.get("grade","")))
-                rc[5].caption("✅" if tasks_data.get(uid,{}).get("tasks") else "❌")
-                rc[6].caption("✅" if ev.get("1차") else "⏳")
-                rc[7].caption("✅" if ev.get("2차") else "⏳")
-                rc[8].caption("✅" if ev.get("3차") else "⏳")
-                rc[9].caption("✅" if ev.get("4차") else "⏳")
-                rc[10].caption("✅" if ev.get("deductions") is not None else "⏳")
-                xl_bytes = generate_eval_excel(uid, u, evaluations, tasks_data)
-                rc[11].download_button("⬇️", data=xl_bytes,
-                                       file_name=f"{u.get('name','')}_근무성적평정표.xlsx",
-                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                       key=f"dl_{uid}")
+                ev = evaluations.get(uid, {})
                 rows_csv.append({
-                    "이름": u.get("name",""), "소속부": dept, "소속팀": team,
-                    "직책": p.get("position",u.get("position","")),
-                    "직급": p.get("grade",u.get("grade","")),
-                    "과제등록": "✅" if tasks_data.get(uid,{}).get("tasks") else "❌",
-                    "1차": "✅" if ev.get("1차") else "⏳",
-                    "2차": "✅" if ev.get("2차") else "⏳",
-                    "3차": "✅" if ev.get("3차") else "⏳",
-                    "4차": "✅" if ev.get("4차") else "⏳",
-                    "태도입력": "✅" if ev.get("deductions") is not None else "⏳",
-                    "확정등급": ag,
+                    "이름":    u.get("name",""),
+                    "소속부":  dept,
+                    "소속팀":  team,
+                    "직책":    p.get("position",u.get("position","")),
+                    "직급":    p.get("grade",u.get("grade","")),
+                    "과제":    "✅" if tasks_data.get(uid,{}).get("tasks") else "❌",
+                    "1차":     "✅" if ev.get("1차") else "⏳",
+                    "2차":     "✅" if ev.get("2차") else "⏳",
+                    "3차":     "✅" if ev.get("3차") else "⏳",
+                    "4차":     "✅" if ev.get("4차") else "⏳",
+                    "태도":    "✅" if ev.get("deductions") is not None else "⏳",
+                    "확정등급": ev.get("assigned_grade", "-"),
                 })
+
+            df_status = pd.DataFrame(rows_csv)
+            st.dataframe(df_status, use_container_width=True, hide_index=True)
+
+            st.divider()
+            # 평정표 다운로드 — 개인별 선택 다운로드 (매번 전체 생성 방지)
+            st.markdown("**⬇️ 개인별 평정표 다운로드**")
+            dl_names = ["선택하세요"] + [u.get("name","") + f" ({uid})"
+                                         for uid, u, p, team, dept in filtered]
+            dl_select = st.selectbox("직원 선택", dl_names, key="dl_select",
+                                     label_visibility="collapsed")
+            if dl_select != "선택하세요":
+                sel_uid = dl_select.split("(")[-1].rstrip(")")
+                sel_u   = users.get(sel_uid, {})
+                if sel_u:
+                    xl_bytes = generate_eval_excel(sel_uid, sel_u, evaluations, tasks_data)
+                    st.download_button(
+                        f"⬇️ {sel_u.get('name','')} 평정표 다운로드",
+                        data=xl_bytes,
+                        file_name=f"{sel_u.get('name','')}_근무성적평정표.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                    )
 
             st.divider()
             df_csv = pd.DataFrame(rows_csv)
@@ -1036,8 +1341,118 @@ def show_admin():
                                file_name=f"직급별순위_{datetime.now().strftime('%Y%m%d')}.csv",
                                mime="text/csv")
 
-    # ── 탭4 계정 관리 ─────────────────────────
+    # ── 탭4 공지 관리 ─────────────────────────
     with tab4:
+        st.subheader("📢 성과평가 안내 공지 관리")
+
+        # 피평가자 입력 잠금 토글
+        with st.container(border=True):
+            is_locked = get_eval_locked()
+            col_l, col_r = st.columns([3, 1])
+            with col_l:
+                st.markdown("**🔒 피평가자 입력 잠금**")
+                if is_locked:
+                    st.error("현재 상태: **잠금** — 피평가자가 과제·참고자료를 입력할 수 없습니다.")
+                else:
+                    st.success("현재 상태: **활성** — 피평가자가 정상적으로 입력할 수 있습니다.")
+            with col_r:
+                if is_locked:
+                    if st.button("🔓 잠금 해제", use_container_width=True, type="primary", key="ee_unlock"):
+                        set_eval_locked(False)
+                        st.success("✅ 잠금이 해제됐습니다."); st.rerun()
+                else:
+                    if st.button("🔒 입력 잠금", use_container_width=True, key="ee_lock"):
+                        set_eval_locked(True)
+                        st.success("✅ 입력이 잠겼습니다."); st.rerun()
+
+        st.divider()
+
+        # 차수별 평가자 입력 잠금 토글
+        st.markdown("**🔒 차수별 평가자 입력 잠금**")
+        st.caption("각 차수(1~4차) 평가자의 평가 입력을 개별적으로 잠그거나 해제합니다.")
+
+        stage_labels_lock = {"1차":"1차 (팀장)","2차":"2차 (부장)","3차":"3차 (본부장)","4차":"4차 (대표이사)"}
+        stage_locks = get_stage_locks()
+
+        lock_cols = st.columns(4)
+        for col, stage in zip(lock_cols, ["1차","2차","3차","4차"]):
+            with col:
+                with st.container(border=True):
+                    locked = stage_locks.get(stage, False)
+                    st.markdown(f"**{stage_labels_lock[stage]}**")
+                    if locked:
+                        st.error("🔒 잠금")
+                    else:
+                        st.success("🔓 활성")
+                    if locked:
+                        if st.button("해제", key=f"unlock_{stage}", use_container_width=True, type="primary"):
+                            set_stage_locked(stage, False)
+                            st.success(f"✅ {stage} 잠금 해제됨"); st.rerun()
+                    else:
+                        if st.button("잠금", key=f"lock_{stage}", use_container_width=True):
+                            set_stage_locked(stage, True)
+                            st.success(f"✅ {stage} 잠금됨"); st.rerun()
+
+        st.divider()
+        st.caption("피평가자 화면의 '성과평가 안내' 탭 내용을 수정합니다.")
+        st.divider()
+
+        notices = get_notices()
+
+        # 기존 공지 수정
+        if notices:
+            st.markdown("**📝 기존 공지 수정·삭제**")
+            for n in notices:
+                with st.expander(f"**{n['order_no']}. {n['title']}**", expanded=False):
+                    with st.form(f"notice_edit_{n['id']}"):
+                        new_title   = st.text_input("제목", value=n["title"], key=f"nt_{n['id']}")
+                        new_content = st.text_area("내용 (마크다운 사용 가능)",
+                                                    value=n["content"], height=120,
+                                                    key=f"nc_{n['id']}")
+                        st.caption("**굵게**, *기울임*, `코드` 등 마크다운 문법 사용 가능")
+                        col_s, col_d, _ = st.columns([1, 1, 3])
+                        if col_s.form_submit_button("💾 저장", type="primary"):
+                            save_notice(n["id"], new_title, new_content)
+                            st.success("✅ 저장됐습니다.")
+                            st.rerun()
+                        if col_d.form_submit_button("🗑️ 삭제"):
+                            delete_notice(n["id"])
+                            st.success("삭제됐습니다.")
+                            st.rerun()
+
+        st.divider()
+
+        # 새 공지 추가
+        st.markdown("**➕ 새 공지 추가**")
+        with st.form("notice_add"):
+            add_title   = st.text_input("제목 (예: 📅 입력 기간)")
+            add_content = st.text_area("내용", height=100,
+                                        placeholder="내용을 입력하세요. **굵게** 등 마크다운 사용 가능")
+            add_order   = st.number_input("순서 번호", min_value=1,
+                                           value=len(notices)+1, step=1)
+            if st.form_submit_button("➕ 공지 추가", type="primary"):
+                if not add_title or not add_content:
+                    st.error("제목과 내용을 입력하세요.")
+                else:
+                    add_notice(add_title, add_content, add_order)
+                    st.success("✅ 공지가 추가됐습니다.")
+                    st.rerun()
+
+        st.divider()
+
+        # 현재 공지 미리보기
+        st.markdown("**👁️ 피평가자 화면 미리보기**")
+        cur_notices = get_notices()
+        if cur_notices:
+            for i, n in enumerate(cur_notices, 1):
+                with st.container(border=True):
+                    st.markdown(f"**{i}. {n['title']}**")
+                    st.markdown(n["content"])
+        else:
+            st.info("등록된 공지가 없습니다.")
+
+    # ── 탭5 계정 관리 ─────────────────────────
+    with tab5:
         st.subheader("🧑‍💼 계정·조직 관리")
         sub1, sub2, sub3 = st.tabs(["📥 엑셀 일괄 생성","✏️ 개별 계정 추가","📌 현재 계정 목록"])
 
@@ -1726,6 +2141,83 @@ def generate_eval_excel(ee_id, ee_info, evaluations, tasks_data):
         ev_nm=users_all.get(ev_uid_,{}).get("name",ev_uid_)
         mc(row,1,row,2); hc(row,1,f"{st_}\n({stage_labels.get(st_,'')} {ev_nm})",bg="375623",sz=8)
         mc(row,3,row,10); dc(row,3,op,bg="FAFAFA"); ws.row_dimensions[row].height=26; row+=1
+
+    # ── 시트2: 근무성적평정서(참고자료) ─────────────────────────
+    sr = get_selfreport(ee_id)
+    ws2 = wb.create_sheet("참고자료(근무성적평정서)")
+    ws2.sheet_view.showGridLines = False
+
+    for i, w in enumerate([4, 60], 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+
+    def hc2(r, val, bg="2E75B6", sz=11):
+        ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        c = ws2.cell(row=r, column=1, value=val)
+        c.font = Font(name="맑은 고딕", bold=True, color="FFFFFF", size=sz)
+        c.fill = PatternFill("solid", start_color=bg)
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        c.border = bdr
+        ws2.row_dimensions[r].height = 24
+
+    def dc2(r, label, value, bg_label="D6E4F0", bg_val="FFFFFF"):
+        c1 = ws2.cell(row=r, column=1, value=label)
+        c1.font = Font(name="맑은 고딕", bold=True, size=9)
+        c1.fill = PatternFill("solid", start_color=bg_label)
+        c1.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        c1.border = bdr
+        c2 = ws2.cell(row=r, column=2, value=value)
+        c2.font = Font(name="맑은 고딕", size=10)
+        c2.fill = PatternFill("solid", start_color=bg_val)
+        c2.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        c2.border = bdr
+
+    # 타이틀
+    ws2.merge_cells("A1:B1")
+    t2 = ws2["A1"]
+    t2.value = f"근무성적평정서 — {ee_info.get('name','')} ({p.get('grade','')} / {p.get('position','')})"
+    t2.font = Font(name="맑은 고딕", bold=True, size=14, color="1F4E79")
+    t2.fill = PatternFill("solid", start_color="D6E4F0")
+    t2.alignment = Alignment(horizontal="left", vertical="center")
+    ws2.row_dimensions[1].height = 32
+
+    sr_row = 2
+
+    # 자기계발 사항
+    hc2(sr_row, "□ 자기계발 사항"); sr_row += 1
+    dc2(sr_row, "1. 올해 교육연수를\n받거나 연구한 사항", sr.get("dev1","(미작성)"))
+    ws2.row_dimensions[sr_row].height = max(80, len(sr.get("dev1","")) // 2 + 40)
+    sr_row += 1
+    dc2(sr_row, "2. 차기년도 희망\n교육연수 사항", sr.get("dev2","(미작성)"))
+    ws2.row_dimensions[sr_row].height = max(80, len(sr.get("dev2","")) // 2 + 40)
+    sr_row += 1
+
+    # 다음연도 업무목표
+    hc2(sr_row, "□ 다음연도 고과평가 대상 기간 중 추진하고자 하는 업무목표 (5개 이내)")
+    sr_row += 1
+    goals = sr.get("goals", [])
+    for i, g in enumerate(goals, 1):
+        if g:
+            dc2(sr_row, f"목표 {i}", g)
+            ws2.row_dimensions[sr_row].height = max(30, len(g) // 3 + 20)
+            sr_row += 1
+    if not any(goals):
+        dc2(sr_row, "업무목표", "(미작성)")
+        ws2.row_dimensions[sr_row].height = 30
+        sr_row += 1
+
+    # 희망부서 및 건의사항
+    hc2(sr_row, "□ 희망부서 및 건의사항"); sr_row += 1
+    dc2(sr_row, "희망부서 및\n건의사항", sr.get("suggestion","(미작성)"))
+    ws2.row_dimensions[sr_row].height = max(80, len(sr.get("suggestion","")) // 2 + 40)
+    sr_row += 1
+
+    # 작성일
+    ws2.merge_cells(f"A{sr_row}:B{sr_row}")
+    c = ws2.cell(row=sr_row, column=1,
+                 value=f"작성일: {sr.get('updated_at','미작성')}")
+    c.font = Font(name="맑은 고딕", size=9, color="888888", italic=True)
+    c.alignment = Alignment(horizontal="right", vertical="center")
+    ws2.row_dimensions[sr_row].height = 20
 
     out=io.BytesIO(); wb.save(out); return out.getvalue()
 
