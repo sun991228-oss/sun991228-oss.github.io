@@ -768,9 +768,9 @@ def show_evaluator():
 
     stage_order = list(EVAL_WEIGHTS.keys())  # 전체 차수 순서 (1차~4차)
 
-    # 팀별 그룹핑 — 팀이 없는 보직자(부장·본부장)는 별도 그룹
+    # 팀별 그룹핑 — 직책이 부장·본부장이면 무조건 보직자 탭
     group        = defaultdict(list)
-    group_bosik  = []   # 부장·본부장 (팀 없음)
+    group_bosik  = []
 
     for ee_id in assigned:
         ee_u   = users.get(ee_id, {})
@@ -778,10 +778,12 @@ def show_evaluator():
         ee_pos = ee_p.get("position", ee_u.get("position","팀원"))
         team   = ee_p.get("team", ee_u.get("team",""))
 
-        if ee_pos in ("부장", "본부장") or not team:
+        if ee_pos in ("부장", "본부장"):
             group_bosik.append(ee_id)
-        else:
+        elif team:
             group[team].append(ee_id)
+        else:
+            group_bosik.append(ee_id)  # 팀도 없고 보직자도 아니면 보직자 탭으로
 
     # 탭 구성: 보직자 탭 먼저, 그 다음 팀별 탭
     tab_names = []
